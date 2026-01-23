@@ -1,0 +1,121 @@
+//@version=5
+indicator("2 Same Color Heikin Ashi", overlay=true)
+
+// ====================================
+// HEIKIN ASHI CALCULATION
+// ====================================
+
+// Heikin Ashi Close
+ha_close = (open + high + low + close) / 4
+
+// Heikin Ashi Open
+var float ha_open = na
+ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
+
+// Heikin Ashi High
+ha_high = math.max(high, math.max(ha_open, ha_close))
+
+// Heikin Ashi Low
+ha_low = math.min(low, math.min(ha_open, ha_close))
+
+// ====================================
+// CANDLE COLOR DETECTION
+// ====================================
+
+// Current and previous candle colors
+current_bullish = ha_close > ha_open
+current_bearish = ha_close < ha_open
+
+// Previous candle (use ta.valuewhen or direct reference)
+prev_ha_close = ha_close[1]
+prev_ha_open = ha_open[1]
+
+prev_bullish = prev_ha_close > prev_ha_open
+prev_bearish = prev_ha_close < prev_ha_open
+
+// ====================================
+// SIGNAL LOGIC
+// ====================================
+
+// 2 consecutive bullish (green) candles
+two_green = current_bullish and prev_bullish
+
+// 2 consecutive bearish (red) candles
+two_red = current_bearish and prev_bearish
+
+// Generate signals only on the second candle
+long_signal = two_green and not two_green[1]  // First occurrence of 2 greens
+short_signal = two_red and not two_red[1]     // First occurrence of 2 reds
+
+// ====================================
+// VISUAL INDICATORS
+// ====================================
+
+// Plot Heikin Ashi candles
+plotcandle(ha_open, ha_high, ha_low, ha_close,
+           title="Heikin Ashi",
+           color=ha_close >= ha_open ? color.new(color.green, 0) : color.new(color.red, 0),
+           wickcolor=ha_close >= ha_open ? color.green : color.red,
+           bordercolor=ha_close >= ha_open ? color.green : color.red)
+
+// Plot signal markers
+plotshape(long_signal,
+          title="LONG Signal",
+          location=location.belowbar,
+          color=color.green,
+          style=shape.triangleup,
+          size=size.small,
+          text="LONG")
+
+plotshape(short_signal,
+          title="SHORT Signal",
+          location=location.abovebar,
+          color=color.red,
+          style=shape.triangledown,
+          size=size.small,
+          text="SHORT")
+
+// Background highlight for signal bars
+bgcolor(long_signal ? color.new(color.green, 90) : na, title="LONG Background")
+bgcolor(short_signal ? color.new(color.red, 90) : na, title="SHORT Background")
+
+// ====================================
+// ALERTS
+// ====================================
+
+// Alert conditions
+alertcondition(long_signal, title="LONG Signal Alert", message='{"signal":"LONG"}')
+alertcondition(short_signal, title="SHORT Signal Alert", message='{"signal":"SHORT"}')
+
+// Combined alert for easier setup
+alertcondition(long_signal or short_signal,
+               title="Any Signal Alert",
+               message='{"signal":"{{strategy.order.action}}"}')
+
+// ====================================
+// DASHBOARD (Optional)
+// ====================================
+
+// Create a simple info table
+var table info_table = table.new(position.top_right, 2, 4,
+                                  bgcolor=color.new(color.black, 80),
+                                  border_width=1,
+                                  border_color=color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Indicator", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    table.cell(info_table, 1, 0, "2 Same Color HA", text_color=color.white)
+
+    table.cell(info_table, 0, 1, "Current State", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    current_state = current_bullish ? "Bullish" : current_bearish ? "Bearish" : "Neutral"
+    state_color = current_bullish ? color.green : current_bearish ? color.red : color.gray
+    table.cell(info_table, 1, 1, current_state, text_color=state_color)
+
+    table.cell(info_table, 0, 2, "Consecutive", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    consecutive_text = two_green ? "2 Green ✓" : two_red ? "2 Red ✓" : "No"
+    table.cell(info_table, 1, 2, consecutive_text, text_color=color.white)
+
+    table.cell(info_table, 0, 3, "Signal", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    signal_text = long_signal ? "LONG" : short_signal ? "SHORT" : "-"
+    signal_color = long_signal ? color.green : short_signal ? color.red : color.gray
+    table.cell(info_table, 1, 3, signal_text, text_color=signal_color)
