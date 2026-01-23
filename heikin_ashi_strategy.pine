@@ -1,0 +1,273 @@
+//@version=6
+strategy("2 Same Color HA Strategy (No Repaint)", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.1)
+
+// ====================================
+// DESCRIPTION
+// ====================================
+// Strategy that enters on 2 consecutive same-color Heikin Ashi candles
+// with ATR-based trailing stop loss and opposite signal exits.
+//
+// KEY FEATURES:
+// - NO REPAINTING: All signals confirmed on bar close
+// - ENTRY: 2 consecutive green HA → LONG, 2 consecutive red HA → SHORT
+// - EXIT: Opposite signal OR ATR trailing stop loss
+// - Separate webhook alerts for entry and exit
+// - Backtest ready with performance metrics
+//
+// WEBHOOK MESSAGES:
+// - Entry LONG: {"signal":"LONG","action":"entry"}
+// - Entry SHORT: {"signal":"SHORT","action":"entry"}
+// - Exit LONG: {"signal":"LONG","action":"exit"}
+// - Exit SHORT: {"signal":"SHORT","action":"exit"}
+
+// ====================================
+// SETTINGS
+// ====================================
+
+// Visual Settings
+show_ha_candles = input.bool(false, "Show Heikin Ashi Candles", group="Display")
+show_stop_lines = input.bool(true, "Show Stop Loss Lines", group="Display")
+
+// ATR Trailing Stop Settings
+atr_length = input.int(14, "ATR Length", minval=1, group="Risk Management")
+atr_multiplier = input.float(0.5, "ATR Multiplier for TSL", minval=0.1, step=0.1, group="Risk Management", tooltip="Multiplier for ATR trailing stop. 0.5 = half ATR distance")
+
+// Strategy Settings
+use_opposite_exit = input.bool(true, "Exit on Opposite Signal", group="Strategy Logic", tooltip="Close position when opposite HA pattern appears")
+use_atr_stop = input.bool(true, "Use ATR Trailing Stop", group="Strategy Logic")
+
+// ====================================
+// HEIKIN ASHI CALCULATION (NO REPAINT)
+// ====================================
+
+// Heikin Ashi Close
+ha_close = (open + high + low + close) / 4
+
+// Heikin Ashi Open
+var float ha_open = na
+ha_open := na(ha_open[1]) ? (open + close) / 2 : (ha_open[1] + ha_close[1]) / 2
+
+// Heikin Ashi High
+ha_high = math.max(high, math.max(ha_open, ha_close))
+
+// Heikin Ashi Low
+ha_low = math.min(low, math.min(ha_open, ha_close))
+
+// ====================================
+// ATR CALCULATION
+// ====================================
+
+atr = ta.atr(atr_length)
+atr_distance = atr * atr_multiplier
+
+// ====================================
+// CANDLE COLOR DETECTION (CONFIRMED)
+// ====================================
+
+// Current bar HA values
+current_bullish = ha_close > ha_open
+current_bearish = ha_close < ha_open
+
+// Previous confirmed bar HA values
+prev_bullish = ha_close[1] > ha_open[1]
+prev_bearish = ha_close[1] < ha_open[1]
+
+// ====================================
+// PATTERN DETECTION (NO REPAINT)
+// ====================================
+
+// 2 consecutive bullish/bearish candles - CONFIRMED
+two_green_confirmed = current_bullish and prev_bullish
+two_red_confirmed = current_bearish and prev_bearish
+
+// Entry signals - fire ONLY on bar close
+long_entry = barstate.isconfirmed and two_green_confirmed and not two_green_confirmed[1]
+short_entry = barstate.isconfirmed and two_red_confirmed and not two_red_confirmed[1]
+
+// Exit signals - opposite pattern appears
+long_exit_signal = barstate.isconfirmed and two_red_confirmed and not two_red_confirmed[1]
+short_exit_signal = barstate.isconfirmed and two_green_confirmed and not two_green_confirmed[1]
+
+// ====================================
+// TRAILING STOP LOSS LOGIC
+// ====================================
+
+var float long_stop = na
+var float short_stop = na
+
+// Update trailing stops
+if strategy.position_size > 0  // In long position
+    // Initialize stop on entry
+    if strategy.position_size[1] <= 0
+        long_stop := close - atr_distance
+    else
+        // Trail stop up, never down
+        long_stop := math.max(long_stop, close - atr_distance)
+else
+    long_stop := na
+
+if strategy.position_size < 0  // In short position
+    // Initialize stop on entry
+    if strategy.position_size[1] >= 0
+        short_stop := close + atr_distance
+    else
+        // Trail stop down, never up
+        short_stop := math.min(short_stop, close + atr_distance)
+else
+    short_stop := na
+
+// ====================================
+// STRATEGY EXECUTION (NO REPAINT)
+// ====================================
+
+// Entry conditions
+if long_entry and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long, alert_message='{"signal":"LONG","action":"entry"}')
+
+if short_entry and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short, alert_message='{"signal":"SHORT","action":"entry"}')
+
+// Exit conditions - Opposite signal
+if use_opposite_exit
+    if long_exit_signal and strategy.position_size > 0
+        strategy.close("LONG", alert_message='{"signal":"LONG","action":"exit","reason":"opposite_signal"}')
+
+    if short_exit_signal and strategy.position_size < 0
+        strategy.close("SHORT", alert_message='{"signal":"SHORT","action":"exit","reason":"opposite_signal"}')
+
+// Exit conditions - ATR Trailing Stop
+if use_atr_stop
+    if strategy.position_size > 0 and not na(long_stop)
+        strategy.exit("LONG TSL", "LONG", stop=long_stop, alert_message='{"signal":"LONG","action":"exit","reason":"trailing_stop"}')
+
+    if strategy.position_size < 0 and not na(short_stop)
+        strategy.exit("SHORT TSL", "SHORT", stop=short_stop, alert_message='{"signal":"SHORT","action":"exit","reason":"trailing_stop"}')
+
+// ====================================
+// VISUAL INDICATORS
+// ====================================
+
+// Optional: Plot Heikin Ashi candles as overlay
+plotcandle(show_ha_candles ? ha_open : na,
+           show_ha_candles ? ha_high : na,
+           show_ha_candles ? ha_low : na,
+           show_ha_candles ? ha_close : na,
+           title="Heikin Ashi Overlay",
+           color=ha_close >= ha_open ? color.new(color.green, 70) : color.new(color.red, 70),
+           wickcolor=ha_close >= ha_open ? color.new(color.green, 70) : color.new(color.red, 70),
+           bordercolor=ha_close >= ha_open ? color.new(color.green, 70) : color.new(color.red, 70))
+
+// Plot entry signals
+plotshape(long_entry,
+          title="LONG Entry",
+          location=location.belowbar,
+          color=color.new(color.green, 0),
+          style=shape.triangleup,
+          size=size.normal,
+          text="LONG\nENTRY")
+
+plotshape(short_entry,
+          title="SHORT Entry",
+          location=location.abovebar,
+          color=color.new(color.red, 0),
+          style=shape.triangledown,
+          size=size.normal,
+          text="SHORT\nENTRY")
+
+// Plot exit signals (opposite pattern)
+plotshape(long_exit_signal and strategy.position_size > 0,
+          title="LONG Exit Signal",
+          location=location.abovebar,
+          color=color.new(color.orange, 0),
+          style=shape.xcross,
+          size=size.small,
+          text="EXIT")
+
+plotshape(short_exit_signal and strategy.position_size < 0,
+          title="SHORT Exit Signal",
+          location=location.belowbar,
+          color=color.new(color.orange, 0),
+          style=shape.xcross,
+          size=size.small,
+          text="EXIT")
+
+// Plot trailing stop levels
+plot(show_stop_lines and strategy.position_size > 0 ? long_stop : na,
+     title="Long Stop",
+     color=color.new(color.red, 0),
+     style=plot.style_linebr,
+     linewidth=2)
+
+plot(show_stop_lines and strategy.position_size < 0 ? short_stop : na,
+     title="Short Stop",
+     color=color.new(color.red, 0),
+     style=plot.style_linebr,
+     linewidth=2)
+
+// Background coloring for pattern detection
+bgcolor(two_green_confirmed ? color.new(color.green, 95) : na, title="Bullish HA Pattern")
+bgcolor(two_red_confirmed ? color.new(color.red, 95) : na, title="Bearish HA Pattern")
+
+// Entry background highlighting
+bgcolor(long_entry ? color.new(color.green, 85) : na, title="LONG Entry BG")
+bgcolor(short_entry ? color.new(color.red, 85) : na, title="SHORT Entry BG")
+
+// ====================================
+// DASHBOARD
+// ====================================
+
+var table info_table = table.new(position.top_right, 2, 7,
+                                  bgcolor=color.new(color.black, 80),
+                                  border_width=1,
+                                  border_color=color.gray)
+
+if barstate.islast
+    table.cell(info_table, 0, 0, "Strategy", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    table.cell(info_table, 1, 0, "2 Same HA (TSL)", text_color=color.white)
+
+    table.cell(info_table, 0, 1, "Position", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    position_text = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "Flat"
+    position_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(info_table, 1, 1, position_text, text_color=position_color)
+
+    table.cell(info_table, 0, 2, "HA Pattern", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    pattern_text = two_green_confirmed ? "2 Green ✓" : two_red_confirmed ? "2 Red ✓" : "No Pattern"
+    table.cell(info_table, 1, 2, pattern_text, text_color=color.white)
+
+    table.cell(info_table, 0, 3, "ATR", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    table.cell(info_table, 1, 3, str.tostring(atr, "#.##"), text_color=color.white)
+
+    table.cell(info_table, 0, 4, "Stop Distance", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    table.cell(info_table, 1, 4, str.tostring(atr_distance, "#.##"), text_color=color.white)
+
+    table.cell(info_table, 0, 5, "Stop Level", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    stop_level = strategy.position_size > 0 ? long_stop : strategy.position_size < 0 ? short_stop : na
+    stop_text = not na(stop_level) ? str.tostring(stop_level, "#.##") : "-"
+    table.cell(info_table, 1, 5, stop_text, text_color=color.red)
+
+    table.cell(info_table, 0, 6, "Bar Status", text_color=color.white, bgcolor=color.new(color.blue, 70))
+    bar_status = barstate.isconfirmed ? "Closed ✓" : "In Progress..."
+    bar_status_color = barstate.isconfirmed ? color.green : color.orange
+    table.cell(info_table, 1, 6, bar_status, text_color=bar_status_color)
+
+// ====================================
+// PERFORMANCE LABELS (Optional)
+// ====================================
+
+// Show trade count on chart
+var label trade_label = na
+if barstate.islast and strategy.closedtrades > 0
+    label.delete(trade_label)
+    win_rate = (strategy.wintrades / strategy.closedtrades) * 100
+    profit_factor_val = strategy.grossprofit / math.max(strategy.grossloss, 1)
+
+    label_text = "Trades: " + str.tostring(strategy.closedtrades) +
+                 "\nWin Rate: " + str.tostring(win_rate, "#.#") + "%" +
+                 "\nProfit Factor: " + str.tostring(profit_factor_val, "#.##") +
+                 "\nNet P&L: " + str.tostring(strategy.netprofit, "#.##")
+
+    trade_label := label.new(bar_index, high, label_text,
+                             style=label.style_label_down,
+                             color=strategy.netprofit >= 0 ? color.new(color.green, 80) : color.new(color.red, 80),
+                             textcolor=color.white,
+                             size=size.small)
