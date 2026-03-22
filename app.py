@@ -1,7 +1,7 @@
 from flask import Flask, request, jsonify
 import requests
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 
 app = Flask(__name__)
 
@@ -108,7 +108,24 @@ def webhook():
 
 @app.route("/", methods=["GET"])
 def health():
-    return "Momenta bot running", 200
+    checks = {}
+    overall = "ok"
+
+    # Check Delta Exchange API reachability
+    try:
+        r = requests.get(f"{DELTA_BASE}/v2/tickers", timeout=5)
+        r.raise_for_status()
+        checks["delta_api"] = "ok"
+    except Exception as e:
+        checks["delta_api"] = f"error: {e}"
+        overall = "degraded"
+
+    status_code = 200 if overall == "ok" else 503
+    return jsonify({
+        "status": overall,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": checks,
+    }), status_code
 
 
 # =========================
