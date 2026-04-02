@@ -16,8 +16,8 @@ def get_eth_spot_price():
     url = f"{DELTA_BASE}/v2/tickers"
     r = requests.get(url).json()
     for item in r["result"]:
-        if item["symbol"] == "ETHUSD":
-            return float(item["last_price"])
+        if item["symbol"] == "ETHUSDT":
+            return float(item["mark_price"])
     return None
 
 
@@ -26,23 +26,25 @@ def get_eth_options():
     r = requests.get(url).json()
     options = []
     for p in r["result"]:
-        if p["contract_type"] in ["call_option", "put_option"]:
-            if p["underlying_asset"] == "ETH":
+        if p["contract_type"] in ["call_options", "put_options"]:
+            underlying = p.get("underlying_asset", {})
+            if isinstance(underlying, dict) and underlying.get("symbol") == "ETH":
                 options.append(p)
     return options
 
 
 def pick_atm_option(options, spot, side):
-    option_type = "call_option" if side == "LONG" else "put_option"
+    option_type = "call_options" if side == "LONG" else "put_options"
 
     filtered = [o for o in options if o["contract_type"] == option_type]
     if not filtered:
         return None
 
-    now = datetime.utcnow().timestamp()
+    now = datetime.now(timezone.utc)
 
     for o in filtered:
-        o["days_to_expiry"] = abs((o["settlement_time"] / 1000) - now) / 86400
+        settlement = datetime.fromisoformat(o["settlement_time"].replace("Z", "+00:00"))
+        o["days_to_expiry"] = (settlement - now).total_seconds() / 86400
 
     # closest to ~10 DTE
     filtered.sort(key=lambda x: abs(x["days_to_expiry"] - 10))
@@ -57,7 +59,9 @@ def pick_atm_option(options, spot, side):
 def get_option_price(symbol):
     url = f"{DELTA_BASE}/v2/tickers/{symbol}"
     r = requests.get(url).json()
-    return float(r["result"]["last_price"])
+    result = r["result"]
+    price = result.get("last_price") or result.get("mark_price")
+    return float(price)
 
 
 # =========================
