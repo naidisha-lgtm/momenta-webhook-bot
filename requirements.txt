@@ -1,3 +1,8 @@
 flask
 requests
 
+# Monte Carlo Simulation Dependencies
+numpy
+pandas
+matplotlib
+
