@@ -1,0 +1,237 @@
+//@version=6
+strategy("Pure PA Momentum Strategy (No Repaint)",
+         overlay=true,
+         initial_capital=10000,
+         default_qty_type=strategy.percent_of_equity,
+         default_qty_value=100,
+         commission_type=strategy.commission.percent,
+         commission_value=0.1,
+         slippage=1)
+
+// ====================================
+// DESCRIPTION
+// ====================================
+// Pure price action momentum strategy.
+// No indicators — signals driven entirely by swing structure.
+//
+// LONG  : Close breaks above the highest high of the last N bars
+// SHORT : Close breaks below the lowest low of the last N bars
+// EXIT  : Opposite breakout OR ATR trailing stop (0.5x ATR)
+//
+// NO REPAINTING — all signals confirmed on bar close only.
+//
+// WEBHOOKS:
+//   Entry LONG  → {"signal":"LONG","action":"entry"}
+//   Entry SHORT → {"signal":"SHORT","action":"entry"}
+//   Exit  LONG  → {"signal":"LONG","action":"exit","reason":"opposite_signal"}
+//   Exit  SHORT → {"signal":"SHORT","action":"exit","reason":"trailing_stop"}
+
+// ====================================
+// INPUTS
+// ====================================
+
+// Swing Structure
+swing_len = input.int(20, "Swing Lookback (bars)", minval=5, maxval=200,
+                      tooltip="Number of bars to look back for swing high/low. Higher = fewer but stronger signals.",
+                      group="Price Action")
+
+// Require confirmation: close must be fully above/below swing level
+// (not just a wick poke — guards against false breakouts)
+confirm_close = input.bool(true, "Require Close Beyond Swing Level",
+                           tooltip="When ON, signals only fire if candle closes beyond the swing, not just wicks.",
+                           group="Price Action")
+
+// ATR Trailing Stop
+atr_len    = input.int(14,  "ATR Length",     minval=1,   group="Trailing Stop")
+atr_mult   = input.float(0.5, "ATR Multiplier", minval=0.1, step=0.1,
+                         tooltip="Stop distance = ATR × multiplier. 0.5 = half ATR.",
+                         group="Trailing Stop")
+use_tsl    = input.bool(true, "Use ATR Trailing Stop", group="Trailing Stop")
+use_opp_exit = input.bool(true, "Exit on Opposite Breakout", group="Trailing Stop")
+
+// Display
+show_levels    = input.bool(true, "Show Swing High/Low Levels", group="Display")
+show_stop_line = input.bool(true, "Show Trailing Stop Line",    group="Display")
+
+// ====================================
+// SWING LEVELS (CONFIRMED, NO REPAINT)
+// ====================================
+
+// Use bars 1..N (excludes current unconfirmed bar)
+// [1] offset ensures we never read the live bar
+swing_high = ta.highest(high[1], swing_len)
+swing_low  = ta.lowest(low[1],  swing_len)
+
+// ====================================
+// BREAKOUT SIGNALS (BAR CLOSE ONLY)
+// ====================================
+
+// Price must close beyond the swing level (not just a wick)
+broke_high = barstate.isconfirmed and (confirm_close ? close > swing_high : high > swing_high)
+broke_low  = barstate.isconfirmed and (confirm_close ? close < swing_low  : low  < swing_low)
+
+// Fire only on the first bar of the breakout, not every bar after
+long_entry  = broke_high and not broke_high[1]
+short_entry = broke_low  and not broke_low[1]
+
+// ====================================
+// ATR TRAILING STOP
+// ====================================
+
+atr          = ta.atr(atr_len)
+atr_distance = atr * atr_mult
+
+var float long_stop  = na
+var float short_stop = na
+
+// Trail the stop each bar while in position
+if strategy.position_size > 0
+    long_stop := strategy.position_size[1] <= 0
+                 ? close - atr_distance                          // initialise on entry
+                 : math.max(long_stop, close - atr_distance)    // trail up, never down
+else
+    long_stop := na
+
+if strategy.position_size < 0
+    short_stop := strategy.position_size[1] >= 0
+                  ? close + atr_distance                         // initialise on entry
+                  : math.min(short_stop, close + atr_distance)  // trail down, never up
+else
+    short_stop := na
+
+// ====================================
+// STRATEGY ORDERS
+// ====================================
+
+// Entries — only enter when flat
+if long_entry and strategy.position_size == 0
+    strategy.entry("LONG", strategy.long,
+                   alert_message='{"signal":"LONG","action":"entry"}')
+
+if short_entry and strategy.position_size == 0
+    strategy.entry("SHORT", strategy.short,
+                   alert_message='{"signal":"SHORT","action":"entry"}')
+
+// Opposite breakout exits
+if use_opp_exit
+    if short_entry and strategy.position_size > 0
+        strategy.close("LONG",
+                       alert_message='{"signal":"LONG","action":"exit","reason":"opposite_signal"}')
+    if long_entry and strategy.position_size < 0
+        strategy.close("SHORT",
+                       alert_message='{"signal":"SHORT","action":"exit","reason":"opposite_signal"}')
+
+// ATR trailing stop exits
+if use_tsl
+    if strategy.position_size > 0 and not na(long_stop)
+        strategy.exit("LONG TSL", "LONG", stop=long_stop,
+                      alert_message='{"signal":"LONG","action":"exit","reason":"trailing_stop"}')
+    if strategy.position_size < 0 and not na(short_stop)
+        strategy.exit("SHORT TSL", "SHORT", stop=short_stop,
+                      alert_message='{"signal":"SHORT","action":"exit","reason":"trailing_stop"}')
+
+// ====================================
+// VISUALS
+// ====================================
+
+// Swing high / low level lines
+plot(show_levels ? swing_high : na,
+     title="Swing High",
+     color=color.new(color.green, 40),
+     style=plot.style_stepline,
+     linewidth=1)
+
+plot(show_levels ? swing_low : na,
+     title="Swing Low",
+     color=color.new(color.red, 40),
+     style=plot.style_stepline,
+     linewidth=1)
+
+// ATR trailing stop
+plot(show_stop_line and strategy.position_size > 0 ? long_stop : na,
+     title="Long TSL",
+     color=color.new(color.red, 0),
+     style=plot.style_linebr,
+     linewidth=2)
+
+plot(show_stop_line and strategy.position_size < 0 ? short_stop : na,
+     title="Short TSL",
+     color=color.new(color.red, 0),
+     style=plot.style_linebr,
+     linewidth=2)
+
+// Entry signals
+plotshape(long_entry,
+          title="LONG Entry",
+          location=location.belowbar,
+          color=color.new(color.green, 0),
+          style=shape.triangleup,
+          size=size.normal,
+          text="LONG")
+
+plotshape(short_entry,
+          title="SHORT Entry",
+          location=location.abovebar,
+          color=color.new(color.red, 0),
+          style=shape.triangledown,
+          size=size.normal,
+          text="SHORT")
+
+// Breakout highlight
+bgcolor(long_entry  ? color.new(color.green, 85) : na, title="LONG BG")
+bgcolor(short_entry ? color.new(color.red,   85) : na, title="SHORT BG")
+
+// ====================================
+// DASHBOARD
+// ====================================
+
+var table dash = table.new(position.top_right, 2, 7,
+                            bgcolor=color.new(color.black, 80),
+                            border_width=1, border_color=color.gray)
+
+if barstate.islast
+    table.cell(dash, 0, 0, "Strategy",      bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(dash, 1, 0, "Pure PA Momentum",                                 text_color=color.white)
+
+    table.cell(dash, 0, 1, "Position",      bgcolor=color.new(color.blue, 70), text_color=color.white)
+    pos_txt   = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "Flat"
+    pos_color = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dash, 1, 1, pos_txt, text_color=pos_color)
+
+    table.cell(dash, 0, 2, "Swing High",    bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(dash, 1, 2, str.tostring(swing_high, "#.##"),                   text_color=color.green)
+
+    table.cell(dash, 0, 3, "Swing Low",     bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(dash, 1, 3, str.tostring(swing_low, "#.##"),                    text_color=color.red)
+
+    table.cell(dash, 0, 4, "ATR Stop",      bgcolor=color.new(color.blue, 70), text_color=color.white)
+    stop_val  = strategy.position_size > 0 ? long_stop : strategy.position_size < 0 ? short_stop : na
+    stop_txt  = not na(stop_val) ? str.tostring(stop_val, "#.##") : "-"
+    table.cell(dash, 1, 4, stop_txt, text_color=color.orange)
+
+    table.cell(dash, 0, 5, "ATR",           bgcolor=color.new(color.blue, 70), text_color=color.white)
+    table.cell(dash, 1, 5, str.tostring(atr, "#.##"),                          text_color=color.white)
+
+    table.cell(dash, 0, 6, "Bar",           bgcolor=color.new(color.blue, 70), text_color=color.white)
+    bar_txt   = barstate.isconfirmed ? "Closed ✓" : "Live..."
+    bar_color = barstate.isconfirmed ? color.green : color.orange
+    table.cell(dash, 1, 6, bar_txt, text_color=bar_color)
+
+// ====================================
+// PERFORMANCE LABEL
+// ====================================
+
+var label perf_label = na
+if barstate.islast and strategy.closedtrades > 0
+    label.delete(perf_label)
+    win_rate = strategy.wintrades / strategy.closedtrades * 100
+    pf       = strategy.grossprofit / math.max(strategy.grossloss, 1)
+    txt      = "Trades: "   + str.tostring(strategy.closedtrades) +
+               "\nWin %: "  + str.tostring(win_rate, "#.#") + "%" +
+               "\nPF: "     + str.tostring(pf, "#.##") +
+               "\nNet P&L: $" + str.tostring(strategy.netprofit, "#.##")
+    perf_label := label.new(bar_index, high * 1.001, txt,
+                             style=label.style_label_down,
+                             color=strategy.netprofit >= 0 ? color.new(color.green, 75) : color.new(color.red, 75),
+                             textcolor=color.white,
+                             size=size.small)
