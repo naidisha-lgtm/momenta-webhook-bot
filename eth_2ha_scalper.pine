@@ -1,0 +1,158 @@
+//@version=5
+strategy(
+    title                = "ETH 2HA Scalper — Delta Scalper Offer",
+    shorttitle           = "2HA Scalper",
+    overlay              = true,
+    initial_capital      = 1000000,
+    default_qty_type     = strategy.percent_of_equity,
+    default_qty_value    = 17,
+    commission_type      = strategy.commission.percent,
+    commission_value     = 0.025,   // = Scalper Offer taker (0.05% open, 0% close)
+    slippage             = 2,
+    calc_on_every_tick   = false,
+    process_orders_on_close = false // entries/exits execute at NEXT bar open (realistic)
+)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ═══════════════════════════════════════════════════════════════════════════
+var GRP_SIG  = "── Signal ───────────────────────────────────────"
+var GRP_EXIT = "── Exit ─────────────────────────────────────────"
+var GRP_VIZ  = "── Visuals ──────────────────────────────────────"
+
+i_exp_mult   = input.float(1.3,  "Expansion Multiplier",  step=0.05, minval=1.0,  group=GRP_SIG,
+                 tooltip="Entry bar range must exceed avg_range × this multiplier")
+i_exp_len    = input.int  (10,   "Expansion Avg Length",  minval=3,  maxval=50,   group=GRP_SIG)
+
+i_bar_auto   = input.bool (true, "Auto Bar-Stop by TF",                           group=GRP_EXIT,
+                 tooltip="1-min→28 bars, 3-min→9 bars (Delta Scalper Offer thresholds)")
+i_bar_manual = input.int  (9,    "Manual Bar-Stop Override", minval=1,            group=GRP_EXIT)
+
+i_show_bars  = input.bool (true, "Show Bar Countdown",                            group=GRP_VIZ)
+i_show_sig   = input.bool (true, "Show Entry Signals",                            group=GRP_VIZ)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BAR-STOP: auto by timeframe (Delta Scalper Offer thresholds)
+// ═══════════════════════════════════════════════════════════════════════════
+bar_stop =
+    not i_bar_auto        ? i_bar_manual :
+    timeframe.period == "1"  ? 28 :   // 1-min  → 28 bars = 28 min max hold
+    timeframe.period == "3"  ? 9  :   // 3-min  → 9 bars  = 27 min max hold
+    timeframe.period == "5"  ? 6  :   // 5-min  → 30 min
+    timeframe.period == "15" ? 4  :   // 15-min → 60 min
+    timeframe.period == "30" ? 3  :   // 30-min → 90 min
+    i_bar_manual
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HEIKIN-ASHI  (calculated on raw OHLC — matches TV's "Heikin Ashi" source)
+// ═══════════════════════════════════════════════════════════════════════════
+ha_c = (open + high + low + close) / 4
+var float ha_o = na
+ha_o := na(ha_o[1]) ? (open + close) / 2 : (ha_o[1] + ha_c[1]) / 2
+
+bull_ha = ha_c > ha_o
+bear_ha = ha_c < ha_o
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPANSION FILTER
+// ═══════════════════════════════════════════════════════════════════════════
+bar_range = high - low
+avg_range = ta.sma(bar_range, i_exp_len)
+expanding = bar_range > avg_range * i_exp_mult
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// Requires: 2 confirmed same-colour HA bars + breakout of prev bar + expansion
+// All reference confirmed bars [1], [2] → zero look-ahead
+// ═══════════════════════════════════════════════════════════════════════════
+long_sig  = bull_ha[1] and bull_ha[2]
+          and close > high[1]
+          and expanding
+
+short_sig = bear_ha[1] and bear_ha[2]
+          and close < low[1]
+          and expanding
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BAR COUNTER
+// ═══════════════════════════════════════════════════════════════════════════
+var int entry_bar = na
+
+if strategy.opentrades == 0
+    entry_bar := na
+if strategy.opentrades > 0 and na(entry_bar)
+    entry_bar := bar_index
+
+bars_held = na(entry_bar) ? 0 : bar_index - entry_bar
+time_exit = bars_held >= bar_stop
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ENTRIES  (only when flat)
+// ═══════════════════════════════════════════════════════════════════════════
+if strategy.opentrades == 0
+    if long_sig
+        strategy.entry("Long",  strategy.long,  comment="2HA_Long")
+    else if short_sig
+        strategy.entry("Short", strategy.short, comment="2HA_Short")
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXITS  (evaluated in priority order each bar)
+//   1. HA flip (use PREVIOUS bar's confirmed HA colour — no look-ahead)
+//   2. Bar-stop time exit
+// ═══════════════════════════════════════════════════════════════════════════
+if strategy.position_size > 0 and bear_ha[1]
+    strategy.close("Long",  comment="HA_Flip")
+
+if strategy.position_size < 0 and bull_ha[1]
+    strategy.close("Short", comment="HA_Flip")
+
+if time_exit and strategy.opentrades > 0
+    strategy.close_all(comment="BarStop_" + str.tostring(bar_stop))
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ALERTS  — payload matches momenta-webhook-bot format: {"signal":"LONG"}
+// Create one alert per condition in the Alerts panel (use "Once Per Bar Close")
+// ═══════════════════════════════════════════════════════════════════════════
+long_entered  = strategy.opentrades[1] == 0 and strategy.position_size  > 0
+short_entered = strategy.opentrades[1] == 0 and strategy.position_size  < 0
+trade_exited  = strategy.opentrades[1]  > 0 and strategy.opentrades    == 0
+
+alertcondition(long_entered,  "Long Entry",  '{"signal":"LONG"}')
+alertcondition(short_entered, "Short Entry", '{"signal":"SHORT"}')
+alertcondition(trade_exited,  "Exit",        '{"signal":"EXIT"}')  // ⚠ bot needs EXIT handler
+
+// ═══════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ═══════════════════════════════════════════════════════════════════════════
+// HA colour overlay on price candles
+barcolor(bull_ha ? color.new(color.teal, 55) : color.new(color.red, 55))
+
+// Entry arrows
+if i_show_sig
+    plotshape(long_sig  and strategy.opentrades == 0,
+              "Long Signal",  shape.triangleup,   location.belowbar,
+              color.new(color.lime, 0), size=size.small)
+    plotshape(short_sig and strategy.opentrades == 0,
+              "Short Signal", shape.triangledown, location.abovebar,
+              color.new(color.red,  0), size=size.small)
+
+// Remaining-bars countdown label while in trade
+if i_show_bars and strategy.opentrades > 0
+    remaining = bar_stop - bars_held
+    label.new(bar_index, high * 1.0003,
+              str.tostring(remaining) + "b",
+              color    = color.new(color.gray, 75),
+              textcolor = color.white,
+              style    = label.style_label_down,
+              size     = size.tiny)
+
+// Horizontal line at entry price
+var line entry_line = na
+if long_entered or short_entered
+    line.delete(entry_line)
+    entry_line := line.new(bar_index, strategy.position_avg_price,
+                           bar_index + bar_stop, strategy.position_avg_price,
+                           color = strategy.position_size > 0 ? color.teal : color.red,
+                           style = line.style_dashed, width = 1)
+if trade_exited
+    line.delete(entry_line)
