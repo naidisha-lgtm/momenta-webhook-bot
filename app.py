@@ -1,11 +1,24 @@
 from flask import Flask, request, jsonify
 import requests
 import json
+import hmac
+import os
 from datetime import datetime
 
 app = Flask(__name__)
 
 DELTA_BASE = "https://api.delta.exchange"
+
+# Shared secret for webhook auth. TradingView alerts cannot send custom
+# headers, so the secret travels in the JSON payload as "secret".
+# Fail at boot rather than silently dropping signals if it is missing.
+WEBHOOK_SECRET = os.environ.get("WEBHOOK_SECRET")
+if not WEBHOOK_SECRET:
+    raise RuntimeError(
+        "WEBHOOK_SECRET environment variable is not set. "
+        "Set it before starting the bot, and add \"secret\": \"<same value>\" "
+        "to the TradingView alert JSON payload."
+    )
 
 
 # =========================
@@ -67,15 +80,23 @@ def get_option_price(symbol):
 @app.route("/webhook", methods=["POST"])
 def webhook():
     raw = request.get_data(as_text=True)
-    print("🔥 RAW PAYLOAD:", raw, flush=True)
 
     # Attempt JSON parse — NEVER FAIL
     try:
         data = json.loads(raw)
-        print("✅ PARSED JSON:", data, flush=True)
     except Exception:
         print("⚠️ NON-JSON PAYLOAD RECEIVED", flush=True)
         return "OK", 200
+
+    # Auth check before anything is logged or acted on. The secret is
+    # popped so it never appears in the logs below.
+    supplied = data.pop("secret", "")
+    if not hmac.compare_digest(str(supplied), WEBHOOK_SECRET):
+        print("🚫 REJECTED — BAD OR MISSING WEBHOOK SECRET", flush=True)
+        return "Unauthorized", 401
+
+    print("🔥 RAW PAYLOAD:", json.dumps(data), flush=True)
+    print("✅ PARSED JSON:", data, flush=True)
 
     side = data.get("signal")
     if side not in ["LONG", "SHORT"]:
